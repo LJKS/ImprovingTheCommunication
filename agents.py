@@ -265,6 +265,7 @@ class Receiver_LSTM_Agent(tf.keras.Model):
         predictions = self.call(messages, reference_objects) # [batch_size, sequence_length, num_distractors+1]
         #now extract the predictions at the current token idxs
         prediction_probs = tf.gather(predictions, current_idxs, batch_dims=1) # [batch_size, num_distractors+1]
+        print(prediction_probs, 'pred_probs')
         assert prediction_probs.shape == (messages.shape[0], self.num_distractors+1)
         prediction_distribution = tfp.distributions.Categorical(probs=prediction_probs)
         actions = prediction_distribution.sample() # [batch_size]

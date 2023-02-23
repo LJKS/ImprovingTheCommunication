@@ -107,7 +107,7 @@ class Vectorized_LM_Residual_Signalling_Game:
         #Attributes changed during runtime
         self._tokens = [[] for _ in range(self.batch_size)] # list of lists, each list is the sequence of tokens for one batch element
         self._current_token_batch = tf.ragged.constant(self._tokens, dtype=tf.int64).to_tensor(default_value=self.eos_token, shape=[self.batch_size, self.max_length]) #The tokens the agents are currently predicting, outer shape: [batch_size, max_length]
-        self._current_token_batch_idxs = np.ones((self.batch_size,), dtype='i') #The indices of the tokens the agents are currently predicting, shape: [batch_size]
+        self._current_token_batch_idxs = np.zeros((self.batch_size,), dtype='i') #The indices of the tokens the agents are currently predicting, shape: [batch_size]
         self._LM_sequence_embeddings = None #The LM embeddings of the tokens the agents are currently predicting, shape: [batch_size, (up to) max_length, embedding_size]
         self._current_lm_embeddings_current_idxs = None #The LM embeddings of the tokens the agents are currently predicting, shape: [batch_size, embedding_size]
         self._speaker_actions = [[] for _ in range(self.batch_size)] # list of lists, each list is the sequence of speaker actions for one batch element
@@ -130,7 +130,7 @@ class Vectorized_LM_Residual_Signalling_Game:
         res_dict["tokens"] = self._tokens[i]
         self._tokens[i] = [self.bos_token]
         res_dict['seq_len'] = self._current_token_batch_idxs[i]
-        self._current_token_batch_idxs[i] = 1
+        self._current_token_batch_idxs[i] = 0
         res_dict['speaker_actions'] = self._speaker_actions[i]
         self._speaker_actions[i] = []
         res_dict['speaker_action_log_probs'] = self.speaker_action_log_probs[i]
@@ -211,8 +211,8 @@ class Vectorized_LM_Residual_Signalling_Game:
         receiver_observations = self._get_receiver_observations()
         receiver_actions, receiver_action_probabilities = self.receiver_agent.act(receiver_observations)
         for i in range(self.batch_size):
-            self._receiver_actions[i].append(receiver_actions[i])
-            self._receiver_predictions[i].append(receiver_action_probabilities[i])
+            self._receiver_actions[i].append(receiver_actions[i].numpy())
+            self._receiver_predictions[i].append(receiver_action_probabilities[i].numpy())
 
     def _decode_residual_actions_to_tokens(self, speaker_residual_actions, temperature=1.0):
         """
@@ -225,7 +225,6 @@ class Vectorized_LM_Residual_Signalling_Game:
         sampled_tokens = tf.squeeze(tf.random.categorical(logits, 1))
         for i in range(self.batch_size):
             self._tokens[i].append(sampled_tokens[i].numpy())
-        print(self._tokens, type(self._tokens[0]), self._tokens[0], len(self._tokens[0]))
         ragged_tokens = tf.ragged.constant(self._tokens)
         self._current_token_batch = ragged_tokens.to_tensor(default_value=self.eos_token, shape=[self.batch_size, self.max_length])
         self._current_token_batch_idxs = self._current_token_batch_idxs + 1
@@ -297,8 +296,8 @@ class Vectorized_LM_Residual_Signalling_Game:
         """
         reward_input_dict = {}
         reward_input_dict["message"] = message
-        reward_input_dict["target_idx"] = target_idx
-        reward_input_dict["prediction_idx"] = prediction_idx
+        reward_input_dict["target_idx"] = target_idx.item()
+        reward_input_dict["prediction_idx"] = prediction_idx.item()
         reward_input_dict["prediction_probabilities"] = prediction_probabilities
         reward_input_dict["is_finished"] = is_finished
         reward = self.reward_function(reward_input_dict)
@@ -313,15 +312,15 @@ class Vectorized_LM_Residual_Signalling_Game:
         for i in range(self.batch_size):
             sequence_finished = self._sequence_is_finished(self._tokens[i])
             self._episode_is_finished[i] = sequence_finished
-            sequence_idx = self._current_token_batch_idxs[i]
+            sequence_idx = self._current_token_batch_idxs[i] - 1 #actions are one step behind the token! (first step there is 1 token, zero actions, second step 2 tokens, 1 action, etc)
             sequence_idx = np.squeeze(sequence_idx).item()
-            reward = self._compute_reward(self._tokens[i], self.underlying_signalling_games[i].target_idx, self._receiver_actions[i][sequence_idx], self._receiver_predictions[i][sequence_idx], sequence_finished)
+            reward = self._compute_reward(self._tokens[i], self.underlying_signalling_games[i]._target_idx, self._receiver_actions[i][sequence_idx], self._receiver_predictions[i][sequence_idx], sequence_finished)
             self._rewards[i].append(reward)
 
 
 def simple_reward_function(reward_f_dict: dict):
     assert type(reward_f_dict['target_idx']) == type(reward_f_dict['prediction_idx'])
-    assert reward_f_dict['target_idx'].shape == reward_f_dict['prediction_probabilities'].shape
+    assert np.asarray(reward_f_dict['target_idx']).shape == reward_f_dict['prediction_probabilities'].shape
     if reward_f_dict['is_finished']:
         if reward_f_dict['target_idx'] == reward_f_dict['prediction_idx']:
             reward = 1
