@@ -23,7 +23,7 @@ Structure:
  - LM_Residual_Signalling_Game_Gym: A class creating a signalling game gym environment for a given LM and based on an underlying signalling game, which is vectorized
 """
 def load_gpt2_TF():
-    model = hf.TFGPT2Model.from_pretrained("gpt2")
+    model = hf.TFGPT2LMHeadModel.from_pretrained("gpt2")
     tokenizer = hf.GPT2Tokenizer.from_pretrained("gpt2")
     return model, tokenizer
 
@@ -50,12 +50,9 @@ class Underlying_Signalling_Game():
     def reset(self):
         #Reset the underlying signalling game, update the target and distractors
         self._target, self._distractors, self._info = next(self.signalling_game_generator)
-        #print(self._target, self._distractors, self._info)
         target_distractor_list = [self._target] + [self._distractors[i] for i in range(self.num_distractors)] #list of target and distractors
         random_permutation = np.random.permutation(self.number_of_elements)
         self._target_idx = np.squeeze(np.argwhere(random_permutation == 0))
-        #print(random_permutation, self._target_idx, target_distractor_list)
-        #[print(i) for i in random_permutation]
         self._target_distractor_ndarray = tf.stack([tf.squeeze(target_distractor_list[i]) for i in random_permutation])
         #assert shapes are correct
         assert self._target_distractor_ndarray.shape == self.number_of_elements + self._target.shape
@@ -92,6 +89,7 @@ class Vectorized_LM_Residual_Signalling_Game:
         self.residual_sender_agent = residual_sender_agent
         self.receiver_agent = receiver_agent
         self.underlying_LM = underlying_LM
+        self.output_embedding = lambda x: x@ self.underlying_LM.get_output_embeddings().weight.T
         self.LM_tokenizer = LM_tokenizer
         self.underlying_signalling_game_class = underlying_signalling_game
         self.signalling_game_generator = signalling_game_generator
@@ -113,12 +111,16 @@ class Vectorized_LM_Residual_Signalling_Game:
         self._LM_sequence_embeddings = None #The LM embeddings of the tokens the agents are currently predicting, shape: [batch_size, (up to) max_length, embedding_size]
         self._current_lm_embeddings_current_idxs = None #The LM embeddings of the tokens the agents are currently predicting, shape: [batch_size, embedding_size]
         self._speaker_actions = [[] for _ in range(self.batch_size)] # list of lists, each list is the sequence of speaker actions for one batch element
+        self.speaker_action_log_probs = [[] for _ in range(self.batch_size)] # list of lists, each list is the sequence of speaker action log probs for one batch element
         self._receiver_actions = [[] for _ in range(self.batch_size)] # list of lists, each list is the sequence of receiver actions for one batch element
         self._receiver_predictions = [[] for _ in range(self.batch_size)] # list of lists, each list is the sequence of receiver predictions for one batch elelement at one timestep, i.e. of shape [num_distractors + 1]
         self._rewards = [[] for _ in range(self.batch_size)] # list of lists, each list is the sequence of receiver rewards for one batch element
         self._episode_is_finished = [False for _ in range(self.batch_size)] # list of booleans, each boolean is True if the episode is finished for one batch element
+        #initial reset
+        for i in range(self.batch_size):
+            self._reset_and_summarize_seq(i, starting_reset=True)
 
-    def _reset_and_summarize_seq(self, i):
+    def _reset_and_summarize_seq(self, i, starting_reset=False):
         """
         Resets the environment and returns the finished sequence
         :param i: the index of the environment to reset
@@ -131,6 +133,8 @@ class Vectorized_LM_Residual_Signalling_Game:
         self._current_token_batch_idxs[i] = 1
         res_dict['speaker_actions'] = self._speaker_actions[i]
         self._speaker_actions[i] = []
+        res_dict['speaker_action_log_probs'] = self.speaker_action_log_probs[i]
+        self.speaker_action_log_probs[i] = []
         res_dict['receiver_actions'] = self._receiver_actions[i]
         self._receiver_actions[i] = []
         res_dict['receiver_predictions'] = self._receiver_predictions[i]
@@ -146,13 +150,14 @@ class Vectorized_LM_Residual_Signalling_Game:
         res_dict["distractors"] = distractors
         target_distractor_ndarray = self.underlying_signalling_games[i]._target_distractor_ndarray
         res_dict["target_distractor_tensor"] = target_distractor_ndarray
-        target_distractor_ndarray_idxs = self.underlying_signalling_games[i]._target__idxs
+        target_distractor_ndarray_idxs = self.underlying_signalling_games[i]._target_idx
         res_dict["target_distractor_ndarray_target_idxs"] = target_distractor_ndarray_idxs
         self.underlying_signalling_games[i].reset()
         #WARNING: This does not update the _current_token_batch, which is recomputed centrally in the _reset_and_export_finished_sequences function
         #WARNING: This is not updating the _current_lm_embeddings_current_idxs, which is recomputed centrally in the step function, via _update_lm_embeddings
         #WARNING: This is not updating the _LM_sequence_embeddings, which is recomputed centrally in the step function, via _update_lm_embeddings
-        res_dict['LM_sequence_embeddings'] = self._LM_sequence_embeddings[i]
+        if not starting_reset:
+            res_dict['LM_sequence_embeddings'] = self._LM_sequence_embeddings[i]
         return res_dict
 
 
@@ -166,7 +171,7 @@ class Vectorized_LM_Residual_Signalling_Game:
         #Notice: This also takes over partial resetting duties (for _LM_sequence_embeddings, _current_lm_embeddings_current_idxs)
         self._update_lm_embeddings()
         #run speaker agents
-        speaker_residual_actions, action_info = self._speaker_act()
+        speaker_residual_actions, speaker_action_log_probs = self._speaker_act()
         #combine speaker outputs with LM prediction
         self._decode_residual_actions_to_tokens(speaker_residual_actions) #this is where the magic happens, i.e. here the residuals are implemented!
         #run receiver agents
@@ -184,6 +189,7 @@ class Vectorized_LM_Residual_Signalling_Game:
         for i in range(self.batch_size):
             if self._episode_is_finished[i]:
                 finished_sequences.append(self._reset_and_summarize_seq(i))
+        #update the current token batch, as some might have been reset
         self._current_token_batch = tf.ragged.constant(self._tokens).to_tensor(default_value=self.eos_token, shape=[self.batch_size, self.max_length])
         return finished_sequences
 
@@ -199,7 +205,7 @@ class Vectorized_LM_Residual_Signalling_Game:
             self._speaker_actions[i].append(speaker_residual_actions[i])
             #TODO this is wrong, plz fix
             self._rewards[i].append(speaker_action_probabilities[i])
-        return speaker_residual_actions
+        return speaker_residual_actions, speaker_action_probabilities
 
     def _receiver_act(self):
         receiver_observations = self._get_receiver_observations()
@@ -214,11 +220,12 @@ class Vectorized_LM_Residual_Signalling_Game:
 
         """
         action_embedding = self._current_lm_embeddings_current_idxs + speaker_residual_actions
-        logits = self.underlying_LM.get_output_embeddings()(action_embedding)
+        logits = action_embedding @ tf.transpose(self.underlying_LM.get_input_embeddings().weight)
         logits = logits / temperature
         sampled_tokens = tf.squeeze(tf.random.categorical(logits, 1))
         for i in range(self.batch_size):
-            self._tokens[i].append(sampled_tokens[i])
+            self._tokens[i].append(sampled_tokens[i].numpy())
+        print(self._tokens, type(self._tokens[0]), self._tokens[0], len(self._tokens[0]))
         ragged_tokens = tf.ragged.constant(self._tokens)
         self._current_token_batch = ragged_tokens.to_tensor(default_value=self.eos_token, shape=[self.batch_size, self.max_length])
         self._current_token_batch_idxs = self._current_token_batch_idxs + 1
@@ -252,7 +259,7 @@ class Vectorized_LM_Residual_Signalling_Game:
         state_dict["target_distractor_ndarray_idxs"] = target_distractor_ndarray_idxs
         return state_dict
 
-    def get_receiver_observations(self):
+    def _get_receiver_observations(self):
         """
         Returns an observation dict with the following keys:
             - 'token_sequences': A batch of sequences, where each sequence is a list of token ids, padded with eos tokens
@@ -328,6 +335,7 @@ def simple_reward_function(reward_f_dict: dict):
 def main():
     # Create a vectorized Environment
     underlying_LM, tokenizer = load_gpt2_TF()
+    output_embeddings = underlying_LM.get_output_embeddings()
     vocab_size = tokenizer.vocab_size
     max_length = 40
     num_distractors = 1
@@ -339,6 +347,7 @@ def main():
     receiver_agent = agents.Receiver_LSTM_Agent(reference_object_size=2048, num_distractors=1, vocabulary_size=vocab_size, language_embedding_size=768, hidden_size=256, num_lstm_layers=1, refmod_hidden_size=512, refmod_num_conv_layers=2, refmod_conv_filters=2)
     env = Vectorized_LM_Residual_Signalling_Game(residual_sender_agent=speaker_agent, receiver_agent=receiver_agent, underlying_LM=underlying_LM, LM_tokenizer=tokenizer, underlying_signalling_game=underlying_signalling_game, signalling_game_generator=iter(sgg_train), num_distractors=num_distractors, vocab_size=vocab_size, max_length=max_length, reward_function=simple_reward_function)
     for _ in range(100):
+        print('step')
         env.step()
 
 

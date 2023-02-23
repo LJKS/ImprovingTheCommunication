@@ -148,7 +148,6 @@ class LSTM_residual_Speaker_Agent(tf.keras.models.Model):
         return policy_head
 
     def call(self, target, distractors, input_seq, language_embedding_seq):
-        print("target", target.shape, "distractors", distractors.shape, "input_seq", input_seq.shape, "language_embedding_seq", language_embedding_seq.shape)
         seq_activation = self.underlying_model([target, distractors, input_seq, language_embedding_seq])
         policy, loc = self.policy_head(seq_activation)
         return policy, loc
@@ -258,6 +257,19 @@ class Receiver_LSTM_Agent(tf.keras.Model):
         sequence = tf.keras.Input(shape=[None])
         reference_objects = tf.keras.Input(shape=[self.num_distractors+1, self.reference_object_size])
         self.call(sequence, reference_objects)
+
+    def act(self, observation_dict):
+        messages = observation_dict['token_sequences']
+        reference_objects = observation_dict['target_distractor_tensor']
+        current_idxs = observation_dict['current_token_idxs']
+        predictions = self.call(messages, reference_objects) # [batch_size, sequence_length, num_distractors+1]
+        #now extract the predictions at the current token idxs
+        prediction_probs = tf.gather(predictions, current_idxs, batch_dims=1) # [batch_size, num_distractors+1]
+        assert prediction_probs.shape == (messages.shape[0], self.num_distractors+1)
+        prediction_distribution = tfp.distributions.Categorical(probs=prediction_probs)
+        actions = prediction_distribution.sample() # [batch_size]
+        log_probs = prediction_distribution.log_prob(actions) # [batch_size]
+        return actions, log_probs
 
 
         
