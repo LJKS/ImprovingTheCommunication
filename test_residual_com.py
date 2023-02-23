@@ -7,6 +7,35 @@ import time
 import numpy as np
 
 
+def get_res_for_analysis(model, gpt2_model, loss_fn, output_embedding_layer, train, test_step):
+    gpt_embeddings = []
+    residuals = []
+    steps = []
+    losses = []
+    gpt_difs = []
+    for epoch in range(1):
+        for img, seq, target, pred_mask in train.take(1000):
+            tt = time.time()
+            gpt_pred = gpt2_model(seq, return_dict=True, output_hidden_states=True).hidden_states[-1]
+            loss, residual, gpt_pred, pp = test_step(img, seq, target, gpt_pred, model, loss_fn, pred_mask,
+                                                     output_embedding_layer)
+            pred_mask = pred_mask.numpy()
+            shape = pred_mask.shape
+            bs = shape[0]
+            sl = shape[1]
+            losses.append(loss.numpy())
+            for b in range(bs):
+
+                for s in range(sl):
+                    if pred_mask[b, s] == 1:
+                        gpt_embeddings.append(gpt_pred[b, s, :].numpy())
+                        residuals.append(residual[b, s, :].numpy())
+                        steps.append(s)
+                        if s != 0:
+                            gpt_dif = gpt_pred[b, s, :] - gpt_pred[b, s - 1, :]
+                            gpt_difs.append(gpt_dif)
+            print(time.time() - tt)
+
 def main(num_epochs=10):
     train, test, val = coco_gpt2_datasets.load_default_resnetfeature_gpt2tokencaption_stringid_cocodatasets()
     gpt2_model, tokenizer = test_huggingface.load_gpt2_TF()
@@ -82,7 +111,7 @@ def main(num_epochs=10):
         seq_n_tokens = tf.reduce_sum(loss_mask, axis=-1, keepdims=True)
         token_pp = tf.math.pow(tf.exp(seq_log_prob*loss_mask), 1/seq_n_tokens)
         seq_pp = tf.reduce_prod(token_pp, axis=-1)
-        pp = tf.reduce_mean(seq_pp)
+        pp = 1./tf.reduce_mean(seq_pp)
         return loss, out_embedding_residuals, gpt_pred, pp
 
     @tf.function
@@ -96,7 +125,7 @@ def main(num_epochs=10):
         seq_n_tokens = tf.reduce_sum(loss_mask, axis=-1, keepdims=True)
         token_pp = tf.math.pow(tf.exp(seq_log_prob*loss_mask), 1/seq_n_tokens)
         seq_pp = tf.reduce_prod(token_pp, axis=-1)
-        pp = tf.reduce_mean(seq_pp)
+        pp = 1./tf.reduce_mean(seq_pp)
         return loss, out_embedding_residuals, gpt_pred, pp
 
     optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
@@ -108,14 +137,21 @@ def main(num_epochs=10):
     output_embedding_layer.set_weights(output_embedding_layer.get_weights())
 
     for epoch in range(num_epochs):
+        test_losses = []
+        test_pps = []
         losses = []
         pps = []
-        for img, seq, target, pred_mask in train.take(10):
+        for img, seq, target, pred_mask in train:
             gpt_pred = gpt2_model(seq, return_dict=True, output_hidden_states=True).hidden_states[-1]
             loss, _, _, pp = train_step(img, seq, target, gpt_pred, optimizer, model, loss_fn, pred_mask, output_embedding_layer)
             losses.append(loss.numpy())
             pps.append(pp.numpy())
-        print('epoch: ', epoch, 'loss: ', np.mean(losses), 'pp: ', np.mean(pps))
+        for img, seq, target, pred_mask in test:
+            gpt_pred = gpt2_model(seq, return_dict=True, output_hidden_states=True).hidden_states[-1]
+            loss, _, _, pp = test_step(img, seq, target, gpt_pred, model, loss_fn, pred_mask, output_embedding_layer)
+            test_losses.append(loss.numpy())
+            test_pps.append(pp.numpy())
+        print('epoch: ', epoch, 'loss: ', np.mean(losses), 'pp: ', np.mean(pps), 'test loss: ', np.mean(test_losses), 'test pp: ', np.mean(test_pps))
 
     return model, gpt2_model, tokenizer, [train, test, val], output_embedding_layer, [train_step, test_step]
 

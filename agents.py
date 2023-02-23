@@ -1,12 +1,16 @@
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-class Target_Distractor_Module(tf.keras.layers.layer)
+class Target_Distractor_Module(tf.keras.layers.Layer):
     """
     Module that creates an informed sender (See Lazaridou 2016) takes in a target and distractors and returns a single embedding (contrary to the token directly)
     """
     def __init__(self, reference_object_size, num_distractors, hidden_size, num_conv_layers, num_conv_filters, is_residual=True, embedding_is_target_residual=True):
         super(Target_Distractor_Module, self).__init__()
+        if is_residual:
+            assert num_conv_filters == num_distractors+1
+        if embedding_is_target_residual:
+            assert hidden_size == reference_object_size
         self.reference_object_size = reference_object_size
         self.num_distractors = num_distractors
         self.hidden_size = hidden_size
@@ -14,8 +18,9 @@ class Target_Distractor_Module(tf.keras.layers.layer)
         self.is_residual = is_residual
         self.embedding_is_target_residual = embedding_is_target_residual
         self.embedding_layer = tf.keras.layers.Dense(hidden_size, activation='relu')
-        self.conv1D_layers = [tf.keras.layers.Conv1D(num_conv_filters, 1, activation='relu') for _ in range(num_conv_layers)]
-        self.out_conv_layer = tf.keras.layers.Conv1D(1, 1, activation='relu')
+        self.conv1D_layers = [tf.keras.layers.Conv1D(filters=num_conv_filters, kernel_size=1, activation='sigmoid', padding='valid') for _ in range(num_conv_layers)]
+        self.out_conv_layer = tf.keras.layers.Conv1D(filters=1, kernel_size=1, activation=None, padding='valid')
+        self._buildmodel()
 
     def call(self, target, distractors):
         """
@@ -28,18 +33,26 @@ class Target_Distractor_Module(tf.keras.layers.layer)
         #Apply first layer to targets and distractor(s), to have them on the shape used for res connections
         embedded_target = self.embedding_layer(target)
         embedded_distractors = self.embedding_layer(distractors)
-        target_exp = tf.expand_dims(embedded_target, axis=1)
-        inputs = tf.concat([target_exp, embedded_distractors], axis=1)
+        embedded_distractors = tf.transpose(embedded_distractors, perm=[0, 2, 1]) # [batch_size, hidden_size, num_distractors]
+        target_exp = tf.expand_dims(embedded_target, axis=2) # [batch_size, hidden_size, 1]
+        inputs = tf.concat([target_exp, embedded_distractors], axis=2) # [batch_size, hidden_size, num_distractors+1]
         for layer in self.conv1D_layers:
-            inputs = layer(inputs)
+            x = layer(inputs) # [batch_size, hidden_size, num_distractors+1]
             if self.is_residual:
-                inputs = inputs + target
-        embedding = self.out_conv_layer(inputs)
-        embedding = tf.squeeze(embedding, axis=1)
+                inputs = inputs + x
+            else:
+                inputs = x
+        embedding = self.out_conv_layer(inputs) # [batch_size, hidden_size, 1]
+        embedding = tf.squeeze(embedding, axis=2) # [batch_size, hidden_size]
         if self.embedding_is_target_residual:
             embedding = embedding + target
         return embedding
 
+    def _buildmodel(self):
+        #Build the model to create weights
+        target = tf.keras.Input(shape=[self.reference_object_size])
+        distractors = tf.keras.Input(shape=[self.num_distractors, self.reference_object_size])
+        self.call(target, distractors)
 class Diagonal_Scale_Policy_Head(tf.keras.layers.Layer):
     """
     Policy head that outputs a diagonal covariance matrix
@@ -50,8 +63,9 @@ class Diagonal_Scale_Policy_Head(tf.keras.layers.Layer):
         self.num_actions = num_actions
         self.min_std = min_std
         self.mean_layer = tf.keras.layers.Dense(num_actions)
-        self.std_layer = tf.keras.layers.Dense(num_actions)
+        self.log_std_layer = tf.keras.layers.Dense(num_actions)
         self.std_activation = lambda x: tf.math.softplus(x) + self.min_std
+        self._buildmodel()
 
     def call(self, inputs):
         """
@@ -66,6 +80,11 @@ class Diagonal_Scale_Policy_Head(tf.keras.layers.Layer):
         policy = tfp.distributions.MultivariateNormalDiag(loc=loc, scale_diag=scale)
         return (policy, loc)
 
+    def _buildmodel(self):
+        #Build the model to create weights
+        inputs = tf.keras.Input(shape=[self.hidden_size])
+        self.call(inputs)
+
 class LSTM_residual_Speaker_Agent(tf.keras.models.Model):
     """
     LSTM residual Speaker Agent. Fundamentally a Network with inputs:
@@ -76,13 +95,13 @@ class LSTM_residual_Speaker_Agent(tf.keras.models.Model):
     Returns:
          - policy over the language embedding space, which will be treated as a residual to the output embedding of a LM
     """
-    def __init__(self, reference_object_size, num_distractors, vocabulary_size, langauge_embedding_size, hidden_size, num_lstm_layers, td_module_hidden_size, td_module_num_conv_layers, td_module_num_conv_filters, policy_head, td_module_is_residual=True, td_module_embedding_is_target_residual=True, reused_embedding_weights=None):
+    def __init__(self, reference_object_size, num_distractors, vocabulary_size, language_embedding_size, hidden_size, num_lstm_layers, td_module_hidden_size, td_module_num_conv_layers, td_module_num_conv_filters, policy_head, td_module_is_residual=True, td_module_embedding_is_target_residual=True, reused_embedding_weights=None):
         super(LSTM_residual_Speaker_Agent, self).__init__()
         #parameters
         self.reference_object_size = reference_object_size
         self.num_distractors = num_distractors
         self.vocabulary_size = vocabulary_size
-        self.langauge_embedding_size = langauge_embedding_size
+        self.langauge_embedding_size = language_embedding_size
         self.hidden_size = hidden_size
         self.num_lstm_layers = num_lstm_layers
         self.reused_embedding_weights = reused_embedding_weights
@@ -105,10 +124,10 @@ class LSTM_residual_Speaker_Agent(tf.keras.models.Model):
 
 
     def _build_underlying_model(self):
-        target_placeholder = tf.keras.layers.Input(shape=[None,self.reference_object_size])
-        distractors_placeholder = tf.keras.layers.Input(shape=[None,self.num_distractors,self.reference_object_size])
-        input_seq_placeholder = tf.keras.layers.Input(shape=[None, None])
-        language_embedding_placeholder = tf.keras.layers.Input(shape=[None, None, self.langauge_embedding_size])
+        target_placeholder = tf.keras.layers.Input(shape=[self.reference_object_size]) # [batch_size, target_size]
+        distractors_placeholder = tf.keras.layers.Input(shape=[self.num_distractors,self.reference_object_size]) # [batch_size, num_distractors, distractor_size=distractor_size]
+        input_seq_placeholder = tf.keras.layers.Input(shape=[None])
+        language_embedding_placeholder = tf.keras.layers.Input(shape=[None, self.langauge_embedding_size])
 
         #prepare LSTM input
         target_distractor_embedding = self.td_module(target_placeholder, distractors_placeholder) # [batch_size, td_module_hidden_size]
@@ -121,20 +140,127 @@ class LSTM_residual_Speaker_Agent(tf.keras.models.Model):
             seq_activation = lstm_layer(seq_activation)
         underlying_model = tf.keras.models.Model(inputs=[target_placeholder, distractors_placeholder, input_seq_placeholder, language_embedding_placeholder], outputs=seq_activation)
         # build underlying model by running it on some dummy data
-        underlying_model(tf.zeros([1,self.reference_object_size]), tf.zeros([1,self.num_distractors,self.reference_object_size]), tf.zeros([1,1]), tf.zeros([1,1,self.langauge_embedding_size]))
+        underlying_model((tf.zeros([1,self.reference_object_size]), tf.zeros([1,self.num_distractors,self.reference_object_size]), tf.zeros([1,1]), tf.zeros([1,1,self.langauge_embedding_size])))
         return underlying_model
 
     def build_policy_head(self, policy_head):
         policy_head = policy_head(self.hidden_size, self.langauge_embedding_size)
-        #run on some dummy data to build the model
-        policy_head(tf.zeros([1,1,self.hidden_size]))
         return policy_head
 
     def call(self, target, distractors, input_seq, language_embedding_seq):
+        print("target", target.shape, "distractors", distractors.shape, "input_seq", input_seq.shape, "language_embedding_seq", language_embedding_seq.shape)
         seq_activation = self.underlying_model([target, distractors, input_seq, language_embedding_seq])
         policy, loc = self.policy_head(seq_activation)
         return policy, loc
 
+    def act(self, state_dict):
+        state_dict["current_token_idxs"]
+        state_dict["target_distractor_tensor"]
+        state_dict["target_distractor_ndarray_idxs"]
+        target = state_dict["targets"]
+        distractors = state_dict["distractors"]
+        input_seq = state_dict["token_sequences"]
+        language_embedding_seq = state_dict["LM_embeddings"]
+        policy, loc = self.call(target, distractors, input_seq, language_embedding_seq)
+        actions = policy.sample()
+        log_probs = policy.log_prob(actions)
+
+        actions = tf.gather(actions, state_dict["current_token_idxs"], batch_dims=1)
+        log_probs = tf.gather(log_probs, state_dict["current_token_idxs"], batch_dims=1)
+        return actions, log_probs
+
+class Reference_Object_Module(tf.keras.layers.Layer):
+    """
+    Module that creates the reference object embedding
+    """
+    def __init__(self, reference_object_size, num_distractors, hidden_size, num_conv_layers, num_conv_filters, is_residual=True):
+        super(Reference_Object_Module, self).__init__()
+        if is_residual:
+            assert num_conv_filters == num_distractors+1
+        self.reference_object_size = reference_object_size
+        self.num_distractors = num_distractors
+        self.hidden_size = hidden_size
+        self.num_layers = num_conv_layers
+        self.is_residual = is_residual
+        self.embedding_layer = tf.keras.layers.Dense(hidden_size, activation='relu')
+        self.conv1D_layers = [tf.keras.layers.Conv1D(filters=num_conv_filters, kernel_size=1, activation='sigmoid', padding='valid') for _ in range(num_conv_layers)]
+        self.out_conv_layer = tf.keras.layers.Conv1D(filters=1, kernel_size=1, activation=None, padding='valid')
+        self._buildmodel()
+
+    def call(self, reference_objects):
+        """
+        Args:
+            target: [batch_size, reference_object_size]
+            distractors: [batch_size, num_distractors, reference_object_size]
+        Returns:
+            embedding: [batch_size, hidden_size]
+        """
+        #Apply first layer to targets and distractor(s), to have them on the shape used for res connections
+        embedded_references = self.embedding_layer(reference_objects) # [batch_size, num_distractors+1, hidden_size]
+        embedded_references = tf.transpose(embedded_references, perm=[0, 2, 1]) # [batch_size, hidden_size, num_distractors]
+        for layer in self.conv1D_layers:
+            x = layer(embedded_references) # [batch_size, hidden_size, num_distractors+1]
+            if self.is_residual:
+                embedded_references = embedded_references + x
+            else:
+                embedded_references = x
+        embedding = self.out_conv_layer(embedded_references) # [batch_size, hidden_size, 1]
+        embedding = tf.squeeze(embedding, axis=2) # [batch_size, hidden_size]
+        return embedding
+
+    def _buildmodel(self):
+        # Build the model to create weights
+        reference_objects = tf.keras.Input(shape=[self.num_distractors+1, self.reference_object_size])
+        self.call(reference_objects)
+
+class Receiver_LSTM_Agent(tf.keras.Model):
+    def __init__(self, reference_object_size, num_distractors, vocabulary_size, language_embedding_size, hidden_size, num_lstm_layers, refmod_hidden_size, refmod_num_conv_layers, refmod_conv_filters, refmod_residual=True, reused_embedding_weights=None):
+        super(Receiver_LSTM_Agent, self).__init__()
+        self.reference_object_size = reference_object_size
+        self.num_distractors = num_distractors
+        self.vocabulary_size = vocabulary_size
+        self.language_embedding_size = language_embedding_size
+        self.hidden_size = hidden_size
+        self.num_lstm_layers = num_lstm_layers
+        self.refmod_hidden_size = refmod_hidden_size
+        self.refmod_num_conv_layers = refmod_num_conv_layers
+        self.refmod_conv_filters = refmod_conv_filters
+        self.refmod_residual = refmod_residual
+        self.reused_embedding_weights = reused_embedding_weights
+        self.embedding_layer = tf.keras.layers.Embedding(vocabulary_size, language_embedding_size)
+        self.reference_object_module = Reference_Object_Module(reference_object_size, num_distractors, refmod_hidden_size, refmod_num_conv_layers, refmod_conv_filters, is_residual=refmod_residual)
+        self.lstm_layers = [tf.keras.layers.LSTM(hidden_size, return_sequences=True) for _ in range(num_lstm_layers)]
+        self.out_layer = tf.keras.layers.Dense(num_distractors+1, activation='softmax')
+        self._buildmodel()
+        if reused_embedding_weights is not None:
+            self.embedding_layer.set_weights(reused_embedding_weights)
+
+    def call(self, sequence, reference_objects):
+        """
+        Args:
+            sequence: [batch_size, sequence_length]
+            reference_objects: [batch_size, num_distractors+1, reference_object_size]
+        Returns:
+            decision_distribution: [batch_size, num_distractors+1]
+        """
+        embedded_sequence = self.embedding_layer(sequence) # [batch_size, sequence_length, language_embedding_size]
+        embedded_reference_objects = self.reference_object_module(reference_objects) # [batch_size, hidden_size]
+        embedded_reference_objects = tf.expand_dims(embedded_reference_objects, axis=1) # [batch_size, 1, hidden_size]
+        embedded_reference_objects = tf.tile(embedded_reference_objects, [1, tf.shape(embedded_sequence)[1], 1]) # [batch_size, sequence_length, hidden_size]
+        embedded_sequence = tf.concat([embedded_sequence, embedded_reference_objects], axis=2) # [batch_size, sequence_length, language_embedding_size+hidden_size]
+        for layer in self.lstm_layers:
+            embedded_sequence = layer(embedded_sequence)
+        decision_distribution = self.out_layer(embedded_sequence) # [batch_size, sequence_length, num_distractors+1]
+        return decision_distribution
+
+    def _buildmodel(self):
+        # Build the model to create weights
+        sequence = tf.keras.Input(shape=[None])
+        reference_objects = tf.keras.Input(shape=[self.num_distractors+1, self.reference_object_size])
+        self.call(sequence, reference_objects)
+
+
+        
         
 
 
