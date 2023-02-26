@@ -4,6 +4,7 @@ import gymnasium as gym
 import numpy as np
 import coco_gpt2_datasets
 import agents
+import time
 def create_coco_caption_signalling_game_data(num_distractors=1, shuffle_buffer_size=10000):
     train, test, val = coco_gpt2_datasets.load_default_resnetfeature_gpt2tokencaption_stringid_cocodatasets()
     def data_to_signalling_game(ds):
@@ -336,7 +337,7 @@ def main():
     underlying_LM, tokenizer = load_gpt2_TF()
     output_embeddings = underlying_LM.get_output_embeddings()
     vocab_size = tokenizer.vocab_size
-    max_length = 40
+    max_length = 150
     num_distractors = 1
     underlying_signalling_game = Underlying_Signalling_Game
     #sgg = signalling_game_generator
@@ -344,11 +345,12 @@ def main():
     policy_head = agents.Diagonal_Scale_Policy_Head
     speaker_agent = agents.LSTM_residual_Speaker_Agent(reference_object_size=2048, num_distractors=1, vocabulary_size=vocab_size, language_embedding_size=768, hidden_size=256, num_lstm_layers=2, td_module_hidden_size=2048, td_module_num_conv_layers=2, td_module_num_conv_filters=2, policy_head=policy_head, td_module_is_residual=True)
     receiver_agent = agents.Receiver_LSTM_Agent(reference_object_size=2048, num_distractors=1, vocabulary_size=vocab_size, language_embedding_size=768, hidden_size=256, num_lstm_layers=1, refmod_hidden_size=512, refmod_num_conv_layers=2, refmod_conv_filters=2)
-    env = Vectorized_LM_Residual_Signalling_Game(residual_sender_agent=speaker_agent, receiver_agent=receiver_agent, underlying_LM=underlying_LM, LM_tokenizer=tokenizer, underlying_signalling_game=underlying_signalling_game, signalling_game_generator=iter(sgg_train), num_distractors=num_distractors, vocab_size=vocab_size, max_length=max_length, reward_function=simple_reward_function)
-    for _ in range(100):
-        print('step')
-        env.step()
-
+    env = Vectorized_LM_Residual_Signalling_Game(residual_sender_agent=speaker_agent, receiver_agent=receiver_agent, underlying_LM=underlying_LM, LM_tokenizer=tokenizer, underlying_signalling_game=underlying_signalling_game, signalling_game_generator=iter(sgg_train), num_distractors=num_distractors, vocab_size=vocab_size, max_length=max_length, reward_function=simple_reward_function, batch_size=128)
+    tt = time.time()
+    steps = 400
+    for _ in range(steps):
+        print(len(env.step()))
+    print(steps/(time.time() - tt))
 
 if __name__ == "__main__":
     main()

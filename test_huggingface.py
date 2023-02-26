@@ -15,6 +15,7 @@ def main():
     #check the model on the sample sentence "Hello, my cat is cute"
     with tf.GradientTape() as tape:
         input_ids = tf.constant(tokenizer.encode("<|endoftext|> This is bullshit!", add_special_tokens=True))
+        print(input_ids)
         outputs = model(input_ids, return_dict=True, output_hidden_states=True)
         print(type(outputs))
         last_hidden_states = outputs.hidden_states[-1]

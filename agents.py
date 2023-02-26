@@ -153,20 +153,24 @@ class LSTM_residual_Speaker_Agent(tf.keras.models.Model):
         return policy, loc
 
     def act(self, state_dict):
-        state_dict["current_token_idxs"]
-        state_dict["target_distractor_tensor"]
-        state_dict["target_distractor_ndarray_idxs"]
         target = state_dict["targets"]
         distractors = state_dict["distractors"]
         input_seq = state_dict["token_sequences"]
         language_embedding_seq = state_dict["LM_embeddings"]
+        current_token_idxs = state_dict["current_token_idxs"]
+        actions, log_probs = self._dif_act(target, distractors, input_seq, language_embedding_seq, current_token_idxs)
+        return actions, log_probs
+
+
+    #seperate function for usage inside of tf.function
+    def _dif_act(self, target, distractors, input_seq, language_embedding_seq, current_token_idxs):
         policy, loc = self.call(target, distractors, input_seq, language_embedding_seq)
         actions = policy.sample()
         log_probs = policy.log_prob(actions)
-
-        actions = tf.gather(actions, state_dict["current_token_idxs"], batch_dims=1)
-        log_probs = tf.gather(log_probs, state_dict["current_token_idxs"], batch_dims=1)
+        actions = tf.gather(actions, current_token_idxs, batch_dims=1)
+        log_probs = tf.gather(log_probs, current_token_idxs, batch_dims=1)
         return actions, log_probs
+
 
 class Reference_Object_Module(tf.keras.layers.Layer):
     """
@@ -262,14 +266,17 @@ class Receiver_LSTM_Agent(tf.keras.Model):
         messages = observation_dict['token_sequences']
         reference_objects = observation_dict['target_distractor_tensor']
         current_idxs = observation_dict['current_token_idxs']
-        predictions = self.call(messages, reference_objects) # [batch_size, sequence_length, num_distractors+1]
-        #now extract the predictions at the current token idxs
-        prediction_probs = tf.gather(predictions, current_idxs, batch_dims=1) # [batch_size, num_distractors+1]
-        print(prediction_probs, 'pred_probs')
-        assert prediction_probs.shape == (messages.shape[0], self.num_distractors+1)
+        action, log_prob = self._dif_act(messages, reference_objects, current_idxs)
+        return action, log_prob
+
+    def _dif_act(self, messages, reference_objects, current_idxs):
+        predictions = self.call(messages, reference_objects)  # [batch_size, sequence_length, num_distractors+1]
+        # now extract the predictions at the current token idxs
+        prediction_probs = tf.gather(predictions, current_idxs, batch_dims=1)  # [batch_size, num_distractors+1]
+        assert prediction_probs.shape == (messages.shape[0], self.num_distractors + 1)
         prediction_distribution = tfp.distributions.Categorical(probs=prediction_probs)
-        actions = prediction_distribution.sample() # [batch_size]
-        log_probs = prediction_distribution.log_prob(actions) # [batch_size]
+        actions = prediction_distribution.sample()  # [batch_size]
+        log_probs = prediction_distribution.log_prob(actions)  # [batch_size]
         return actions, log_probs
 
 
