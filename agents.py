@@ -280,8 +280,75 @@ class Receiver_LSTM_Agent(tf.keras.Model):
         return actions, log_probs
 
 
-        
-        
+#Mostly a clone of the LSTM Sender, but not with a policy head, but rather a critic head
+class Sender_LSTM_Critic(tf.keras.models.Model):
+    def __init__(self, reference_object_size, num_distractors, vocabulary_size, language_embedding_size, hidden_size,
+                 num_lstm_layers, td_module_hidden_size, td_module_num_conv_layers, td_module_num_conv_filters, td_module_is_residual=True, td_module_embedding_is_target_residual=True,
+                 reused_embedding_weights=None):
+        super(Sender_LSTM_Critic, self).__init__()
+        # parameters
+        self.reference_object_size = reference_object_size
+        self.num_distractors = num_distractors
+        self.vocabulary_size = vocabulary_size
+        self.langauge_embedding_size = language_embedding_size
+        self.hidden_size = hidden_size
+        self.num_lstm_layers = num_lstm_layers
+        self.reused_embedding_weights = reused_embedding_weights
+        self.td_module_hidden_size = td_module_hidden_size
+        self.td_module_num_conv_layers = td_module_num_conv_layers
+        self.td_module_num_conv_filters = td_module_num_conv_filters
+        self.td_module_is_residual = td_module_is_residual
+        self.td_module_embedding_is_target_residual = td_module_embedding_is_target_residual
 
+        # network elements
+        self.td_module = Target_Distractor_Module(reference_object_size=self.reference_object_size,
+                                                  num_distractors=self.num_distractors,
+                                                  hidden_size=self.td_module_hidden_size,
+                                                  num_conv_layers=self.td_module_num_conv_layers,
+                                                  num_conv_filters=self.td_module_num_conv_filters,
+                                                  is_residual=self.td_module_is_residual,
+                                                  embedding_is_target_residual=self.td_module_embedding_is_target_residual)
+        self.lstm_input_layer = tf.keras.layers.Dense(self.hidden_size,
+                                                      activation='relu')  # not strictly necessary but makes sure
+        self.lstm_layers = [tf.keras.layers.LSTM(self.hidden_size, return_sequences=True) for _ in
+                            range(self.num_lstm_layers)]
+        self.embedding_layer = tf.keras.layers.Embedding(self.vocabulary_size, self.langauge_embedding_size)
+        self.out_layer = tf.keras.layers.Dense(1)
 
+        self.underlying_model = self._build_underlying_model()
+        if self.reused_embedding_weights is not None:
+            self.embedding_layer.embeddings.assign(self.reused_embedding_weights)
+    def _build_underlying_model(self):
+        target_placeholder = tf.keras.layers.Input(shape=[self.reference_object_size])  # [batch_size, target_size]
+        distractors_placeholder = tf.keras.layers.Input(shape=[self.num_distractors,
+                                                               self.reference_object_size])  # [batch_size, num_distractors, distractor_size=distractor_size]
+        input_seq_placeholder = tf.keras.layers.Input(shape=[None])
+        language_embedding_placeholder = tf.keras.layers.Input(shape=[None, self.langauge_embedding_size])
 
+        # prepare LSTM input
+        target_distractor_embedding = self.td_module(target_placeholder,
+                                                     distractors_placeholder)  # [batch_size, td_module_hidden_size]
+        target_distractor_embedding_exp = tf.expand_dims(target_distractor_embedding,
+                                                         axis=1)  # [batch_size, 1, td_module_hidden_size]
+        target_distractor_embedding_seq = tf.tile(target_distractor_embedding_exp,
+                                                  [1, tf.shape(input_seq_placeholder)[1],
+                                                   1])  # [batch_size, seq_len, td_module_hidden_size]
+        token_embeddings = self.embedding_layer(input_seq_placeholder)  # [batch_size, seq_len, langauge_embedding_size]
+        lstm_input = tf.concat([target_distractor_embedding_seq, token_embeddings, language_embedding_placeholder],
+                               axis=2)  # [batch_size, seq_len, td_module_hidden_size + token_embedding_size + langauge_embedding_size]
+        seq_activation = self.lstm_input_layer(lstm_input)  # [batch_size, seq_len, hidden_size]
+        for lstm_layer in self.lstm_layers:
+            seq_activation = lstm_layer(seq_activation)
+        seq_activation = self.out_layer(seq_activation)  # [batch_size, seq_len, 1]
+        underlying_model = tf.keras.models.Model(
+            inputs=[target_placeholder, distractors_placeholder, input_seq_placeholder, language_embedding_placeholder],
+            outputs=seq_activation)
+        # build underlying model by running it on some dummy data
+        underlying_model((tf.zeros([1, self.reference_object_size]),
+                          tf.zeros([1, self.num_distractors, self.reference_object_size]), tf.zeros([1, 1]),
+                          tf.zeros([1, 1, self.langauge_embedding_size])))
+        return underlying_model
+
+    def call(self, target, distractors, input_seq, language_embedding_seq):
+        seq_activation = self.underlying_model([target, distractors, input_seq, language_embedding_seq])
+        return seq_activation

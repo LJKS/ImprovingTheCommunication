@@ -121,6 +121,9 @@ class Vectorized_LM_Residual_Signalling_Game:
         for i in range(self.batch_size):
             self._reset_and_summarize_seq(i, starting_reset=True)
 
+    def reset_all(self):
+        for i in range(self.batch_size):
+            self._reset_and_summarize_seq(i, starting_reset=True)
     def _reset_and_summarize_seq(self, i, starting_reset=False):
         """
         Resets the environment and returns the finished sequence
@@ -128,6 +131,12 @@ class Vectorized_LM_Residual_Signalling_Game:
         :return: the finished sequence as a dict
         """
         res_dict = {}
+        #WARNING: This does not update the _current_token_batch, which is recomputed centrally in the _reset_and_export_finished_sequences function
+        #WARNING: This is not updating the _current_lm_embeddings_current_idxs, which is recomputed centrally in the step function, via _update_lm_embeddings
+        #WARNING: This is not updating the _LM_sequence_embeddings, which is recomputed centrally in the step function, via _update_lm_embeddings
+        if not starting_reset:
+            res_dict['LM_sequence_embeddings'] = self._LM_sequence_embeddings[i][:self._current_token_batch_idxs[i]]
+
         res_dict["tokens"] = self._tokens[i]
         self._tokens[i] = [self.bos_token]
         res_dict['seq_len'] = self._current_token_batch_idxs[i]
@@ -154,11 +163,7 @@ class Vectorized_LM_Residual_Signalling_Game:
         target_distractor_ndarray_idxs = self.underlying_signalling_games[i]._target_idx
         res_dict["target_distractor_ndarray_target_idxs"] = target_distractor_ndarray_idxs
         self.underlying_signalling_games[i].reset()
-        #WARNING: This does not update the _current_token_batch, which is recomputed centrally in the _reset_and_export_finished_sequences function
-        #WARNING: This is not updating the _current_lm_embeddings_current_idxs, which is recomputed centrally in the step function, via _update_lm_embeddings
-        #WARNING: This is not updating the _LM_sequence_embeddings, which is recomputed centrally in the step function, via _update_lm_embeddings
-        if not starting_reset:
-            res_dict['LM_sequence_embeddings'] = self._LM_sequence_embeddings[i]
+
         return res_dict
 
 
@@ -204,8 +209,7 @@ class Vectorized_LM_Residual_Signalling_Game:
         speaker_residual_actions, speaker_action_probabilities = self.residual_sender_agent.act(speaker_observations)
         for i in range(self.batch_size):
             self._speaker_actions[i].append(speaker_residual_actions[i])
-            #TODO this is wrong, plz fix
-            self._rewards[i].append(speaker_action_probabilities[i])
+            self.speaker_action_log_probs[i].append(speaker_action_probabilities[i])
         return speaker_residual_actions, speaker_action_probabilities
 
     def _receiver_act(self):
@@ -324,11 +328,11 @@ def simple_reward_function(reward_f_dict: dict):
     assert np.asarray(reward_f_dict['target_idx']).shape == reward_f_dict['prediction_probabilities'].shape
     if reward_f_dict['is_finished']:
         if reward_f_dict['target_idx'] == reward_f_dict['prediction_idx']:
-            reward = 1
+            reward = 1.
         else:
-            reward = 0
+            reward = 0.
     else:
-        reward = 0
+        reward = 0.
     return reward
 
 
