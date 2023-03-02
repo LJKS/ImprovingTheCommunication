@@ -227,6 +227,7 @@ class Vectorized_LM_Residual_Signalling_Game:
         action_embedding = self._current_lm_embeddings_current_idxs + speaker_residual_actions
         logits = action_embedding @ tf.transpose(self.underlying_LM.get_input_embeddings().weight)
         logits = logits / temperature
+        print(f'average prob of eos token, should be {1/self.vocab_size}, is {tf.reduce_mean(tf.nn.softmax(logits, axis=1)[:,self.eos_token]).numpy()}')
         sampled_tokens = tf.squeeze(tf.random.categorical(logits, 1))
         for i in range(self.batch_size):
             self._tokens[i].append(sampled_tokens[i].numpy())

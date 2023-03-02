@@ -307,7 +307,8 @@ class Sender_LSTM_Critic(tf.keras.models.Model):
                                                   num_conv_layers=self.td_module_num_conv_layers,
                                                   num_conv_filters=self.td_module_num_conv_filters,
                                                   is_residual=self.td_module_is_residual,
-                                                  embedding_is_target_residual=self.td_module_embedding_is_target_residual)
+                                                  embedding_is_target_residual=self.td_module_embedding_is_target_residual
+                                                  )
         self.lstm_input_layer = tf.keras.layers.Dense(self.hidden_size,
                                                       activation='relu')  # not strictly necessary but makes sure
         self.lstm_layers = [tf.keras.layers.LSTM(self.hidden_size, return_sequences=True) for _ in
@@ -320,8 +321,7 @@ class Sender_LSTM_Critic(tf.keras.models.Model):
             self.embedding_layer.embeddings.assign(self.reused_embedding_weights)
     def _build_underlying_model(self):
         target_placeholder = tf.keras.layers.Input(shape=[self.reference_object_size])  # [batch_size, target_size]
-        distractors_placeholder = tf.keras.layers.Input(shape=[self.num_distractors,
-                                                               self.reference_object_size])  # [batch_size, num_distractors, distractor_size=distractor_size]
+        distractors_placeholder = tf.keras.layers.Input(shape=[self.num_distractors, self.reference_object_size])  # [batch_size, num_distractors, distractor_size=distractor_size]
         input_seq_placeholder = tf.keras.layers.Input(shape=[None])
         language_embedding_placeholder = tf.keras.layers.Input(shape=[None, self.langauge_embedding_size])
 
@@ -350,5 +350,11 @@ class Sender_LSTM_Critic(tf.keras.models.Model):
         return underlying_model
 
     def call(self, target, distractors, input_seq, language_embedding_seq):
+        #tf print all the input shapes
+        tf.print("target shape: ", tf.shape(target))
+        tf.print("distractors shape: ", tf.shape(distractors))
+        tf.print("input_seq shape: ", tf.shape(input_seq))
+        tf.print("language_embedding_seq shape: ", tf.shape(language_embedding_seq))
+
         seq_activation = self.underlying_model([target, distractors, input_seq, language_embedding_seq])
         return seq_activation
