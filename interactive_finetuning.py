@@ -42,7 +42,7 @@ def sample_runs(signalling_game, target_num_steps):
         resulting_trajectories = signalling_game.step()
         for trajectory in resulting_trajectories:
             trajectory_steps = trajectory['seq_len']
-            assert trajectory_steps > 1
+            #assert trajectory_steps > 1
             num_steps += trajectory_steps
             trajectory['speaker_actions'] = tf.stack(trajectory['speaker_actions'], axis=0)
             trajectory['receiver_actions'] = tf.stack(trajectory['receiver_actions'], axis=0)
@@ -89,21 +89,25 @@ def prepare_ppo_ds(dataset, critic, gamma=0.99, lam=0.95, value_function_batchin
 def train_sender_ppo(data, sender, sender_optimizer, kl_cutoff=1.5, kl_averaging_weight=0.95, entropy_regularization_factor=0.001, clip_ratio=0.2, num_epochs=10):
     #trains the sender agent via PPO
     #rewrite this for timeseries data!TODO
-    def train_step(target, distractors, input_seq, language_embedding_seq, speaker_actions, old_log_probs, advantages, clip_ratio=0.2):
+    def train_step(target, distractors, input_seq, language_embedding_seq, speaker_actions, old_log_probs, advantages, seq_len, clip_ratio=0.2):
+        target_mask = tf.sequence_mask(seq_len, maxlen=tf.shape(input_seq)[1]-1, dtype=tf.float32)
         #train step for the sender agent
         with tf.GradientTape() as tape:
             #compute the loss
+            #TODO potentially check the validity of applying the target mask here
             sender_policy, _loc = sender(target, distractors, input_seq[:,:-1], language_embedding_seq)
             action_log_probs = sender_policy.log_prob(speaker_actions)
             p_ratio = tf.exp(action_log_probs - old_log_probs)
             advantage_ratio_scores = p_ratio * advantages
             clipped_advantage_ratio_scores = tf.clip_by_value(p_ratio, 1 - clip_ratio, 1 + clip_ratio) * advantages
-            ppo_objective = tf.minimum(advantage_ratio_scores, clipped_advantage_ratio_scores)
+            ppo_objective = tf.minimum(advantage_ratio_scores, clipped_advantage_ratio_scores) * target_mask
+            #print('target_mask', target_mask.shape, 'ppo', ppo_objective.shape, 'seq_len', seq_len, 'input_seq', input_seq.shape, 'old_log_probs', old_log_probs.shape)
             kl_estimate = old_log_probs - action_log_probs
             kl_estimate = tf.reduce_mean(kl_estimate)
-            entropy_estimate = tf.reduce_mean(action_log_probs)
+            entropy_estimate = tf.reduce_mean(action_log_probs * target_mask)
+            # negative because by default TF is minimizing
             ppo_loss = - (tf.reduce_mean(ppo_objective) + entropy_regularization_factor * entropy_estimate)
-        print(f'entropy_estimate vs analytic: {sender_policy.entropy().numpy()} vs {entropy_estimate.numpy()}')
+        print(f'entropy_estimate vs analytic: {tf.reduce_mean(sender_policy.entropy()*target_mask).numpy()} vs {entropy_estimate.numpy()}')
         #compute the gradients
         gradients = tape.gradient(ppo_loss, sender.trainable_variables)
         #apply the gradients
@@ -116,18 +120,25 @@ def train_sender_ppo(data, sender, sender_optimizer, kl_cutoff=1.5, kl_averaging
         if average_kl > kl_cutoff:
             break
         for speaker_actions, speaker_action_log_probs, rewards, tokens, seq_len, target, distractors, LM_sequence_embeddings, target_distractor_tensor, target_idx, V_s, td_error, gae, rewards_to_go in data:
-            ppo_loss, kl_estimate, entropy_estimate = train_step(target=target, distractors=distractors, input_seq=tokens, language_embedding_seq=LM_sequence_embeddings, speaker_actions=speaker_actions, old_log_probs=speaker_action_log_probs, advantages=gae, clip_ratio=clip_ratio)
+            ppo_loss, kl_estimate, entropy_estimate = train_step(target=target, distractors=distractors, input_seq=tokens, language_embedding_seq=LM_sequence_embeddings, speaker_actions=speaker_actions, old_log_probs=speaker_action_log_probs, advantages=gae, clip_ratio=clip_ratio, seq_len=seq_len)
             average_kl = kl_averaging_weight * average_kl + (1 - kl_averaging_weight) * kl_estimate
             if average_kl > kl_cutoff:
-                print('stopping training due to high kl')
+                print(f'stopping training due to high kl {average_kl.numpy()} > {kl_cutoff}')
                 break
 
 def train_critic(critic, data, critic_optimizer, num_epochs=1):
-    mse_loss = tf.keras.losses.MeanSquaredError()
-    def train_step(target, distractors, input_seq, language_embedding_seq, rewards_to_go):
+    def squared_error_loss(y_true, y_pred):
+        return tf.square(y_true - y_pred)
+    def train_step(target, distractors, input_seq, language_embedding_seq, rewards_to_go, seq_len):
+        target_mask = tf.sequence_mask(seq_len, maxlen=tf.shape(input_seq)[1]-1, dtype=tf.float32)
         with tf.GradientTape() as tape:
-            critic_output = critic(target, distractors, input_seq, language_embedding_seq)
-            critic_loss = mse_loss(rewards_to_go, critic_output)
+            critic_output = critic(target, distractors, input_seq[:,:-1], language_embedding_seq)
+            critic_output = tf.squeeze(critic_output, axis=-1)
+            #print('rewards_to_go', rewards_to_go.shape, 'critic_output', critic_output.shape, 'target_mask', target_mask.shape)
+            critic_loss = squared_error_loss(rewards_to_go, critic_output)
+            #print('critic_loss', critic_loss.shape)
+            critic_loss = tf.reduce_mean(critic_loss * target_mask)
+            critic_loss = critic_loss / tf.reduce_mean(target_mask)
         #compute the gradients
         gradients = tape.gradient(critic_loss, critic.trainable_variables)
         #apply the gradients
@@ -137,15 +148,20 @@ def train_critic(critic, data, critic_optimizer, num_epochs=1):
 
     for epoch in range(num_epochs):
         for speaker_actions, speaker_action_log_probs, rewards, tokens, seq_len, target, distractors, LM_sequence_embeddings, target_distractor_tensor, target_idx, V_s, td_error, gae, rewards_to_go in data:
-            critic_loss = train_step(target=target, distractors=distractors, input_seq=tokens, language_embedding_seq=LM_sequence_embeddings, rewards_to_go=rewards_to_go)
+            critic_loss = train_step(target=target, distractors=distractors, input_seq=tokens, language_embedding_seq=LM_sequence_embeddings, rewards_to_go=rewards_to_go, seq_len=seq_len)
 
 
-def train_receiver_supervised(receiver, data, receiver_optimizer, num_epochs=1):
-    cce = tf.keras.losses.CategoricalCrossentropy()
-    def train_step(message, target_distractor_tensor, target_idx):
+def train_receiver_supervised(receiver, data, receiver_optimizer, num_epochs=1, num_distractors=1):
+    cce = tf.keras.losses.CategoricalCrossentropy(reduction='none')
+    def train_step(message, target_distractor_tensor, target_idx, seq_len):
+        target_mask = tf.sequence_mask(seq_len, maxlen=tf.shape(message)[1], dtype=tf.float32)
+        target_idx = tf.one_hot(target_idx, depth=num_distractors+1)
+        # tile targets along the timesteps dimension, from (batch_size, num_distractors+1) to (batch_size, timesteps, num_distractors+1)
+        target_idx = tf.tile(tf.expand_dims(target_idx, axis=1), [1, tf.shape(message)[1], 1])
         with tf.GradientTape() as tape:
             receiver_output = receiver(message, target_distractor_tensor)
-            cce_loss = cce(target_idx, receiver_output)
+            cce_loss = cce(target_idx, receiver_output) * target_mask
+            cce_loss = tf.reduce_mean(cce_loss) / tf.reduce_mean(target_mask)
         #compute the gradients
         gradients = tape.gradient(cce_loss, receiver.trainable_variables)
         #apply the gradients
@@ -154,7 +170,7 @@ def train_receiver_supervised(receiver, data, receiver_optimizer, num_epochs=1):
         return cce_loss
     for epoch in range(num_epochs):
         for speaker_actions, speaker_action_log_probs, rewards, tokens, seq_len, target, distractors, LM_sequence_embeddings, target_distractor_tensor, target_idx, V_s, td_error, gae, rewards_to_go in data:
-            cce_loss = train_step(message=LM_sequence_embeddings, target_distractor_tensor=target_distractor_tensor, target_idx=target_idx)
+            cce_loss = train_step(message=tokens, target_distractor_tensor=target_distractor_tensor, target_idx=target_idx, seq_len=seq_len)
 
 
 
@@ -194,21 +210,21 @@ def main():
     receiver_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
     critic_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
     for i in range(10):
-        dataset = sample_runs(env, 2000)
+        dataset = sample_runs(env, 4000)
         print(f'epoch {i}, sampled dataset')
         dataset = prepare_ppo_ds(dataset, critic)
         print(f'epoch {i}, prepared dataset')
-        print('check here')
-        for elem in dataset.take(1):
-            for e, n in zip(elem, ['speaker_actions', 'speaker_action_log_probs', 'rewards', 'tokens', 'seq_len', 'target', 'distractors', 'LM_sequence_embeddings', 'target_distractor_tensor', 'target_idx', 'V_s', 'td_error', 'gae', 'rewards_to_go']):
-                print(n, e.shape)
-        dataset = dataset.padded_batch(32, padded_shapes=(
+        #print('check here')
+        #for elem in dataset.take(1):
+        #    for e, n in zip(elem, ['speaker_actions', 'speaker_action_log_probs', 'rewards', 'tokens', 'seq_len', 'target', 'distractors', 'LM_sequence_embeddings', 'target_distractor_tensor', 'target_idx', 'V_s', 'td_error', 'gae', 'rewards_to_go']):
+        #        print(n, e.shape)
+        dataset = dataset.cache().shuffle(4000).padded_batch(32, padded_shapes=(
         [None, None], [None], [None], [None], [], [None], [None, None], [None, 768], [None, None], [], [None], [None], [None], [None]))
 
         train_sender_ppo(sender=speaker_agent, data=dataset, sender_optimizer=sender_optimizer, num_epochs=1)
-        print(speaker_agent.summary())
-        receiver_agent.build()
-        print(receiver_agent.summary())
+        #print(speaker_agent.summary())
+        receiver_agent(tf.zeros(shape=(128, 10), dtype=tf.int32), tf.zeros(shape=(128, 2, 2048), dtype=tf.float32))
+        #print(receiver_agent.summary())
         print(critic.summary())
         print(f'epoch {i}, trained sender')
         train_receiver_supervised(receiver=receiver_agent, data=dataset, receiver_optimizer=receiver_optimizer)

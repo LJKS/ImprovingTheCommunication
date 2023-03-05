@@ -115,7 +115,8 @@ class LSTM_residual_Speaker_Agent(tf.keras.models.Model):
         self.td_module = Target_Distractor_Module(reference_object_size=self.reference_object_size, num_distractors=self.num_distractors, hidden_size=self.td_module_hidden_size, num_conv_layers=self.td_module_num_conv_layers, num_conv_filters=self.td_module_num_conv_filters, is_residual=self.td_module_is_residual, embedding_is_target_residual=self.td_module_embedding_is_target_residual)
         self.lstm_input_layer = tf.keras.layers.Dense(self.hidden_size, activation='relu') # not strictly necessary but makes sure
         self.lstm_layers = [tf.keras.layers.LSTM(self.hidden_size, return_sequences=True) for _ in range(self.num_lstm_layers)]
-        self.embedding_layer = tf.keras.layers.Embedding(self.vocabulary_size, self.langauge_embedding_size)
+        embedding_trainable = False if reused_embedding_weights is not None else True
+        self.embedding_layer = tf.keras.layers.Embedding(self.vocabulary_size, self.langauge_embedding_size, trainable=embedding_trainable)
         self.underlying_model = self._build_underlying_model()
         if self.reused_embedding_weights is not None:
             self.embedding_layer.embeddings.assign(self.reused_embedding_weights)
@@ -230,7 +231,8 @@ class Receiver_LSTM_Agent(tf.keras.Model):
         self.refmod_conv_filters = refmod_conv_filters
         self.refmod_residual = refmod_residual
         self.reused_embedding_weights = reused_embedding_weights
-        self.embedding_layer = tf.keras.layers.Embedding(vocabulary_size, language_embedding_size)
+        embedding_trainable = False if reused_embedding_weights is not None else True
+        self.embedding_layer = tf.keras.layers.Embedding(vocabulary_size, language_embedding_size, trainable=embedding_trainable)
         self.reference_object_module = Reference_Object_Module(reference_object_size, num_distractors, refmod_hidden_size, refmod_num_conv_layers, refmod_conv_filters, is_residual=refmod_residual)
         self.lstm_layers = [tf.keras.layers.LSTM(hidden_size, return_sequences=True) for _ in range(num_lstm_layers)]
         self.out_layer = tf.keras.layers.Dense(num_distractors+1, activation='softmax')
@@ -313,7 +315,9 @@ class Sender_LSTM_Critic(tf.keras.models.Model):
                                                       activation='relu')  # not strictly necessary but makes sure
         self.lstm_layers = [tf.keras.layers.LSTM(self.hidden_size, return_sequences=True) for _ in
                             range(self.num_lstm_layers)]
-        self.embedding_layer = tf.keras.layers.Embedding(self.vocabulary_size, self.langauge_embedding_size)
+        embedding_trainable = False if reused_embedding_weights is not None else True
+
+        self.embedding_layer = tf.keras.layers.Embedding(self.vocabulary_size, self.langauge_embedding_size, trainable=embedding_trainable)
         self.out_layer = tf.keras.layers.Dense(1)
 
         self.underlying_model = self._build_underlying_model()
@@ -351,10 +355,10 @@ class Sender_LSTM_Critic(tf.keras.models.Model):
 
     def call(self, target, distractors, input_seq, language_embedding_seq):
         #tf print all the input shapes
-        tf.print("target shape: ", tf.shape(target))
-        tf.print("distractors shape: ", tf.shape(distractors))
-        tf.print("input_seq shape: ", tf.shape(input_seq))
-        tf.print("language_embedding_seq shape: ", tf.shape(language_embedding_seq))
+        #tf.print("target shape: ", tf.shape(target))
+        #tf.print("distractors shape: ", tf.shape(distractors))
+        #tf.print("input_seq shape: ", tf.shape(input_seq))
+        #tf.print("language_embedding_seq shape: ", tf.shape(language_embedding_seq))
 
         seq_activation = self.underlying_model([target, distractors, input_seq, language_embedding_seq])
         return seq_activation
